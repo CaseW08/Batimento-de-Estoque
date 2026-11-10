@@ -33,23 +33,20 @@ except NameError:                      # rodando célula a célula, sem __file__
 PASTA_ENTRADA = Path(os.environ.get("BATIMENTO_ENTRADA", PASTA_SCRIPT))
 PASTA_SAIDA   = Path(os.environ.get("BATIMENTO_SAIDA", PASTA_SCRIPT))
 
-ARQ_IQ09        = PASTA_ENTRADA / "IQ09.xlsx"
-ARQ_GERENCIADOR = PASTA_ENTRADA / "GerenciadorInformacoesEspecificas.csv"
-ARQ_ESTOQUE     = PASTA_ENTRADA / "EstoqueLocalPorLote.csv"
-ARQ_MAPA        = PASTA_ENTRADA / "Mapa de Locais.xlsx"
-ARQ_AVARIAS     = PASTA_ENTRADA / "00 - Avarias.xlsx"
-ARQ_DEVOLUCOES  = PASTA_ENTRADA / "01 - Devoluções.xlsx"
-
-faltando = [a.name for a in (ARQ_IQ09, ARQ_GERENCIADOR, ARQ_ESTOQUE, ARQ_MAPA, ARQ_AVARIAS, ARQ_DEVOLUCOES) if not a.exists()]
+ARQUIVOS = [
+    "IQ09.xlsx", "GerenciadorInformacoesEspecificas.csv", "EstoqueLocalPorLote.csv",
+    "Mapa de Locais.xlsx", "00 - Avarias.xlsx", "01 - Devoluções.xlsx",
+]
+faltando = [a for a in ARQUIVOS if not (PASTA_ENTRADA / a).exists()]
 if faltando:
     raise FileNotFoundError(f"Arquivos não encontrados em {PASTA_ENTRADA}: {', '.join(faltando)}")
 
 CAMINHO_EXCEL = PASTA_SAIDA / f"Batimento_Estoque_{datetime.now():%Y-%m-%d_%H%M}.xlsx"
 
 # %% Importar bases
-df_iq09        = pd.read_excel(ARQ_IQ09)
-df_gerenciador = pd.read_csv(ARQ_GERENCIADOR, low_memory=False)
-df_estoque     = pd.read_csv(ARQ_ESTOQUE, low_memory=False)
+df_iq09        = pd.read_excel(PASTA_ENTRADA / "IQ09.xlsx")
+df_gerenciador = pd.read_csv(PASTA_ENTRADA / "GerenciadorInformacoesEspecificas.csv", low_memory=False)
+df_estoque     = pd.read_csv(PASTA_ENTRADA / "EstoqueLocalPorLote.csv", low_memory=False)
 
 # %% Corrige o gerenciador de informação específica
 df_gerenciador_corrigido = df_gerenciador.copy()
@@ -62,33 +59,19 @@ df_gerenciador_corrigido = df_gerenciador_corrigido[
 # %% Corrige o estoque local por lote
 df_estoque_corrigido = df_estoque.copy()
 df_estoque_corrigido["Data de Fabricação"] = pd.to_datetime(
-    df_estoque_corrigido["Data de Fabricação"],
-    format="%d/%m/%Y %H:%M:%S",
-    errors="coerce",
+    df_estoque_corrigido["Data de Fabricação"], format="%d/%m/%Y %H:%M:%S", errors="coerce",
 ).astype("datetime64[us]")
-
-df_estoque_corrigido = df_estoque_corrigido.merge(
-    df_gerenciador_corrigido[["Lote", "Valor"]],   # chave + coluna que vem do gerenciador
-    on="Lote",
-    how="left",
-)
+df_estoque_corrigido = df_estoque_corrigido.merge(df_gerenciador_corrigido[["Lote", "Valor"]], on="Lote", how="left")
 df_estoque_corrigido = df_estoque_corrigido.dropna(subset="Valor")
-
 df_estoque_corrigido = df_estoque_corrigido[[
-    "Local", "Lote", "Código do Produto", "Local Ativo", "Lote Liberado",
-    "Data de Fabricação", "Setor", "Valor",
+    "Local", "Lote", "Código do Produto", "Local Ativo", "Lote Liberado", "Data de Fabricação", "Setor", "Valor",
 ]]
 df_estoque_corrigido = df_estoque_corrigido.rename(columns={
-    "Código do Produto": "Material",
-    "Data de Fabricação": "Data",
-    "Setor": "Setor Completo",
-    "Valor": "Serial",
+    "Código do Produto": "Material", "Data de Fabricação": "Data", "Setor": "Setor Completo", "Valor": "Serial",
 })
-
 df_estoque_corrigido["Setor"] = np.where(
     df_estoque_corrigido["Setor Completo"].str.startswith("B", na=False),
-    df_estoque_corrigido["Setor Completo"].str[:9],
-    df_estoque_corrigido["Setor Completo"],
+    df_estoque_corrigido["Setor Completo"].str[:9], df_estoque_corrigido["Setor Completo"],
 )
 df_estoque_corrigido["Lote"] = df_estoque_corrigido["Lote"].astype("int64")
 
@@ -98,76 +81,51 @@ df_iq09_corrigido = df_iq09_corrigido[["Material", "UII", "Centro", "Depósito",
 df_iq09_corrigido = df_iq09_corrigido.rename(columns={"UII": "Serial", "Depósito": "Deposito", "Criado em": "Data"})
 df_iq09_corrigido["Setor"] = df_iq09_corrigido["Centro"].astype("str") + "_" + df_iq09_corrigido["Deposito"].astype("str")
 
-# %% Cria a base de análise (todas as séries dos dois estoques, sem repetir)
+# %% Cria a base de análise
 df_analise = (
-    pd.concat(
-        [df_estoque_corrigido[["Serial"]], df_iq09_corrigido[["Serial"]]],
-        ignore_index=True,
-    )
-    .drop_duplicates()
-    .reset_index(drop=True)
+    pd.concat([df_estoque_corrigido[["Serial"]], df_iq09_corrigido[["Serial"]]], ignore_index=True)
+    .drop_duplicates().reset_index(drop=True)
 )
-
-# Dados do SAP (IQ09)
-df_analise = df_analise.merge(
-    df_iq09_corrigido[["Serial", "Material", "Centro", "Deposito", "Data", "Setor"]],
-    on="Serial",
-    how="left",
-)
+df_analise = df_analise.merge(df_iq09_corrigido[["Serial", "Material", "Centro", "Deposito", "Data", "Setor"]], on="Serial", how="left")
 df_analise = df_analise.rename(columns={
-    "Material": "Material SAP", "Centro": "Centro SAP", "Deposito": "Deposito SAP",
-    "Data": "Data SAP", "Setor": "Setor SAP",
+    "Material": "Material SAP", "Centro": "Centro SAP", "Deposito": "Deposito SAP", "Data": "Data SAP", "Setor": "Setor SAP",
 })
-
-# Dados do WMS (estoque local por lote)
 df_analise = df_analise.merge(
     df_estoque_corrigido[["Serial", "Local", "Lote", "Material", "Local Ativo", "Lote Liberado", "Data", "Setor Completo", "Setor"]],
-    on="Serial",
-    how="left",
+    on="Serial", how="left",
 )
 df_analise = df_analise.rename(columns={
     "Material": "Material WMS", "Data": "Data WMS", "Setor": "Setor WMS", "Setor Completo": "Setor Completo WMS",
 })
 df_analise["Centro WMS"] = np.where(
-    df_analise["Setor WMS"].str.startswith("B", na=False),
-    df_analise["Setor WMS"].str[:4],
-    df_analise["Setor WMS"],
+    df_analise["Setor WMS"].str.startswith("B", na=False), df_analise["Setor WMS"].str[:4], df_analise["Setor WMS"],
 )
 df_analise["Deposito WMS"] = np.where(
-    df_analise["Setor WMS"].str.startswith("B", na=False),
-    df_analise["Setor WMS"].str[5:9],
-    df_analise["Setor WMS"],
+    df_analise["Setor WMS"].str.startswith("B", na=False), df_analise["Setor WMS"].str[5:9], df_analise["Setor WMS"],
 )
 df_analise["Rua"] = df_analise["Local"].str[:3]
 
-# Tipo de local, pela rua
 rua_txt = df_analise["Rua"].astype(str).str.strip().str.upper()
 cond_tipo_local = [
-    df_analise["Rua"].isna() | (rua_txt == ""),   # sem local (nulo ou vazio)
-    rua_txt.str.startswith("R"),
-    rua_txt.str.startswith("B"),
-    rua_txt.str.startswith("F"),
-    rua_txt.str.startswith("AV"),
+    df_analise["Rua"].isna() | (rua_txt == ""),
+    rua_txt.str.startswith("R"), rua_txt.str.startswith("B"), rua_txt.str.startswith("F"),
+    rua_txt.str.startswith("AV"), rua_txt.str.startswith("SUC"), rua_txt.str.startswith("D0"),
+    rua_txt.str.startswith("INV"), rua_txt.str.startswith("SB"),
 ]
-val_tipo_local = ["Sem Local", "Rua", "Blocado", "Falta", "Avaria"]
-df_analise["Tipo de Local"] = np.select(cond_tipo_local, val_tipo_local, default="Outros")
-
+df_analise["Tipo de Local"] = np.select(
+    cond_tipo_local,
+    ["Sem Local", "Rua", "Blocado", "Falta", "Avaria", "Sucata", "Devolução", "Inventário", "Inventário"],
+    default="Outros",
+)
 df_analise["Lote"] = df_analise["Lote"].astype("Int64")
 
 # %% Mapa de locais
-df_mapa = pd.read_excel(ARQ_MAPA)
+df_mapa = pd.read_excel(PASTA_ENTRADA / "Mapa de Locais.xlsx")
 df_mapa["Tipo de Centro Rua"] = np.where(df_mapa["Centro2"].str.contains("-"), "Mono", "Multi")
-df_mapa = df_mapa.rename(columns={
-    "Tipo": "Tipo de Material Rua", "Centro1": "Centro 1 da Rua", "Centro2": "Centro 2 da Rua",
-})
-
+df_mapa = df_mapa.rename(columns={"Tipo": "Tipo de Material Rua", "Centro1": "Centro 1 da Rua", "Centro2": "Centro 2 da Rua"})
 df_analise = df_analise.merge(
-    df_mapa[["Rua", "Tipo de Material Rua", "Centro 1 da Rua", "Centro 2 da Rua", "Tipo de Centro Rua"]],
-    on="Rua",
-    how="left",
+    df_mapa[["Rua", "Tipo de Material Rua", "Centro 1 da Rua", "Centro 2 da Rua", "Tipo de Centro Rua"]], on="Rua", how="left",
 )
-
-# Reordena as colunas
 df_analise = df_analise[[
     "Serial", "Material SAP", "Material WMS", "Data SAP", "Data WMS",
     "Centro SAP", "Deposito SAP", "Setor SAP",
@@ -177,92 +135,54 @@ df_analise = df_analise[[
     "Lote", "Lote Liberado",
 ]]
 
-# %% Qualidade: avarias (fica só a data mais recente de cada série)
-df_avaria = pd.read_excel(ARQ_AVARIAS)
+# %% Qualidade: avarias
+df_avaria = pd.read_excel(PASTA_ENTRADA / "00 - Avarias.xlsx")
 df_avaria_corrigido = df_avaria.dropna(subset="Nº SÉRIE").copy()
-
-# A coluna DATA vem com dois formatos misturados
 data_str = df_avaria_corrigido["DATA"].astype(str).str.strip()
-d_br  = pd.to_datetime(data_str, format="%d/%m/%Y %H:%M:%S", errors="coerce")  # 16/10/2026 09:30:55
-d_iso = pd.to_datetime(data_str, format="ISO8601", errors="coerce")            # 2026-04-08 09:40:00
+d_br  = pd.to_datetime(data_str, format="%d/%m/%Y %H:%M:%S", errors="coerce")
+d_iso = pd.to_datetime(data_str, format="ISO8601", errors="coerce")
 df_avaria_corrigido["DATA"] = d_br.fillna(d_iso)
-
 df_avaria_corrigido["Nº SÉRIE"] = df_avaria_corrigido["Nº SÉRIE"].astype(str).str.strip().str.upper()
-df_avaria_corrigido = (
-    df_avaria_corrigido
-    .sort_values("DATA", ascending=False)
-    .drop_duplicates(subset="Nº SÉRIE", keep="first")
-    .reset_index(drop=True)
-)
+df_avaria_corrigido = df_avaria_corrigido.sort_values("DATA", ascending=False).drop_duplicates(subset="Nº SÉRIE", keep="first").reset_index(drop=True)
 df_avaria_corrigido = df_avaria_corrigido.rename(columns={"Nº SÉRIE": "Serial", "RESULTADO FINAL ETIQUETA": "Status Av"})
 
-# %% Qualidade: devoluções (fica só a data mais recente de cada série)
-df_devolucao = pd.read_excel(ARQ_DEVOLUCOES, header=1)
+# %% Qualidade: devoluções
+df_devolucao = pd.read_excel(PASTA_ENTRADA / "01 - Devoluções.xlsx", header=1)
 df_devolucao_corrigido = df_devolucao.dropna(subset="NÚMERO DE SÉRIE").copy()
-
 data_str = df_devolucao_corrigido["DATA"].astype(str).str.strip()
 d_br  = pd.to_datetime(data_str, format="%d/%m/%Y %H:%M:%S", errors="coerce")
 d_iso = pd.to_datetime(data_str, format="ISO8601", errors="coerce")
 df_devolucao_corrigido["DATA"] = d_br.fillna(d_iso)
-
 df_devolucao_corrigido["NÚMERO DE SÉRIE"] = df_devolucao_corrigido["NÚMERO DE SÉRIE"].astype(str).str.strip().str.upper()
-df_devolucao_corrigido = (
-    df_devolucao_corrigido
-    .sort_values("DATA", ascending=False)
-    .drop_duplicates(subset="NÚMERO DE SÉRIE", keep="first")
-    .reset_index(drop=True)
-)
+df_devolucao_corrigido = df_devolucao_corrigido.sort_values("DATA", ascending=False).drop_duplicates(subset="NÚMERO DE SÉRIE", keep="first").reset_index(drop=True)
 df_devolucao_corrigido = df_devolucao_corrigido.rename(columns={"NÚMERO DE SÉRIE": "Serial", "ESTOQUE FINAL": "Status Dev"})
 
-# %% Qualidade: status final de cada série (Status IQC)
+# %% Qualidade: status final de cada série
 df_qualidade = (
-    pd.concat(
-        [df_avaria_corrigido[["Serial"]], df_devolucao_corrigido[["Serial"]]],
-        ignore_index=True,
-    )
-    .drop_duplicates()
-    .reset_index(drop=True)
+    pd.concat([df_avaria_corrigido[["Serial"]], df_devolucao_corrigido[["Serial"]]], ignore_index=True)
+    .drop_duplicates().reset_index(drop=True)
 )
 df_qualidade = df_qualidade.merge(df_avaria_corrigido[["Serial", "Status Av"]], on="Serial", how="left")
 df_qualidade = df_qualidade.merge(df_devolucao_corrigido[["Serial", "Status Dev"]], on="Serial", how="left")
-
-# B137 vem com variações (B137-A etc.)
 for col in ["Status Av", "Status Dev"]:
     df_qualidade.loc[df_qualidade[col].str.startswith("B137", na=False), col] = "B137"
-
 av  = df_qualidade["Status Av"].astype(object).str.strip().str.upper()
 dev = df_qualidade["Status Dev"].astype(object).str.strip().str.upper()
-
-cond_iqc = [
-    av.isna() | dev.isna(),                  # algum nulo: vale o preenchido
-    (av == dev),                             # iguais: vale o Av
-    (av == "B136") | (dev == "B136"),
-    (av == "B137") | (dev == "B137"),
-    (av == "B149") | (dev == "B149"),
-]
-val_iqc = [av.combine_first(dev), av, "B136", "B137", "B149"]
-df_qualidade["Status IQC"] = np.select(cond_iqc, val_iqc, default="APROVADO")
-
-# Traz o Status IQC para a análise
+cond_iqc = [av.isna() | dev.isna(), (av == dev), (av == "B136") | (dev == "B136"), (av == "B137") | (dev == "B137"), (av == "B149") | (dev == "B149")]
+df_qualidade["Status IQC"] = np.select(cond_iqc, [av.combine_first(dev), av, "B136", "B137", "B149"], default="APROVADO")
 df_analise = df_analise.merge(df_qualidade[["Serial", "Status IQC"]], on="Serial", how="left")
 
-# Aprovado vira o depósito livre do centro
-mapa_livre = {
-    "B123": "B110", "B124": "B110",
-    "B158": "B114", "B159": "B114",
-    "B179": "B413", "B180": "B413",
-}
+mapa_livre = {"B123": "B110", "B124": "B110", "B158": "B114", "B159": "B114", "B179": "B413", "B180": "B413"}
 aprovado = df_analise["Status IQC"] == "APROVADO"
 livre_do_centro = df_analise["Centro SAP"].map(mapa_livre)
 mask = aprovado & livre_do_centro.notna()
 df_analise.loc[mask, "Status IQC"] = livre_do_centro[mask]
-
-# Garantia não tem B149 (outlet): vira o livre
 mask = df_analise["Centro SAP"].isin(["B179", "B180"]) & (df_analise["Status IQC"] == "B149")
 df_analise.loc[mask, "Status IQC"] = "B413"
+print("Linhas:", len(df_analise))
 
-# %% Regras da análise (ordem de prioridade em "regras")
 
+# %% Regras da análise (a ordem das regras define a prioridade)
 def limpa(s):
     return s.astype(object).str.strip().str.upper()
 
@@ -319,6 +239,9 @@ ROTULO_B140 = "Mover no WMS para B140"
 # Rótulo da regra do B135
 ROTULO_B135 = "Material em IQC, errado no WMS"
 
+# B140 no WMS com o depósito do SAP livre: o WMS precisa validar se a série é mesmo B140
+ROTULO_VALIDAR_B140 = "Validar no WMS se é B140"
+
 # Rótulos das regras de validar no físico
 ROTULO_VALIDAR_EXISTE = "Validar no físico se existe"     # SAP em falta (B111) e WMS fora de falta
 ROTULO_VALIDAR_AVARIA = "Validar no físico se é avaria"   # SAP livre e WMS em avaria, sem IQC
@@ -331,25 +254,53 @@ DEP_AVARIA = ["B149", "B137", "B136"]
 ROTULO_SETOR = "Corrigir setor no WMS"
 
 # Rótulo da regra da rua errada (o centro do SAP não é o da rua onde o pallet está)
-ROTULO_RUA = "Mover pallet para a rua do centro correto"
+ROTULO_RUA = "Mover pallet para a rua do centro correto"      # só locais de Rua e Blocado (nível local)
 
 # Rótulo da regra de avaria: série em local de avaria com depósito livre no SAP
 ROTULO_AV_B148 = "Mover no SAP para B148"
 
-# Rótulo da regra de avaria: SAP já em depósito de avaria e WMS ainda em B148
-ROTULO_AV_WMS = "Mover no WMS para o depósito do SAP"
+# Nas áreas de setor fixo (avaria, sucata, devolução e transitório) a série nunca muda de setor:
+# não existe ação de corrigir o setor, só mover a série para um local do setor correto (o setor dela no SAP).
+ROTULO_MOVER_SERIE = "Mover série para local do setor correto"
 
-# Rótulo da regra de avaria: setor do WMS diferente do SAP (o que sobraria em análise na avaria)
-ROTULO_SETOR_AV = "Corrigir setor AV"
+# Série nos dois estoques, em local que não tem setor cadastrado no WMS
+ROTULO_CADASTRAR = "Cadastrar setor do local no WMS"
 
-# Rótulos das regras de desmembrar (ação no físico, no local inteiro). Só valem para locais do tipo Rua ou Blocado.
-ROTULO_DESM_FISICO = "Desmembrar físico"        # local com mais de um setor no SAP
-ROTULO_DESM_DATA   = "Desmembrar multi data"    # local livre (pelo SAP) com mais de uma data no SAP
+# Rótulos das regras de desmembrar (ação no físico, no local inteiro)
+ROTULO_DESM_FISICO = "Desmembrar físico"        # local Rua ou Blocado com mais de um setor no SAP
+ROTULO_DESM_DATA   = "Desmembrar multi data"    # local de Rua com mais de uma data entre as séries livres no SAP
 
 # Locais de stage (tipo de local "Outros"): doca, packing e afins. O que sobraria em "Em análise" neles vira "Em stage".
 ROTULO_STAGE   = "Em stage"
 LOCAIS_STAGE   = ["00000347", "00000348", "OUT001111", "00038456"]
 PADRAO_STAGE   = r"^(000\d+|OUT\d+)$"           # outros locais com o mesmo padrão de nome
+
+# Devolução: área de recebimento de devolução (locais que começam com "D0"). O depósito padrão é o B148
+# (no WMS, o DEVT equivale ao B148) e o centro esperado vem do local (e não do mapa de ruas).
+# Local D0 que não está na lista: vale o centro do setor do WMS, se houver.
+LOCAIS_DEVOLUCAO = {
+    # locais que serão criados
+    "D010111": "B123",
+    "D010211": "B124",
+    "D010311": "B158",
+    "D010411": "B159",
+    "D010511": "B179",
+    "D010611": "B180",
+    # locais que já existem
+    "D0101111":     "B124",
+    "D0103111":     "B123",
+    "D0104111":     "B124",
+    "D0106111":     "B158",
+    "D01D01001011": "B123",
+}
+
+# Série que existe só no WMS e está em setor de expedição: aguardando expedição
+SETORES_PENDENTE_EXPEDICAO = ["DOCA"]
+ROTULO_EXPEDICAO = "Pendente expedição"
+
+# Local transitório: tipo "Outros" que não é stage. A rua está fora do mapa, então o centro da rua não é exigido
+# e cada série é avaliada sozinha. A série que bate em tudo vira "Saldo em transitório" (e não "OK").
+ROTULO_TRANSITO = "Saldo em transitório"
 
 # Depósitos em que o lote precisa estar liberado (livres e B149)
 DEP_LOTE_LIBERADO = ["B110", "B114", "B413", "B149"]
@@ -378,10 +329,29 @@ tipo_fisico = tipo_local.isin(["RUA", "BLOCADO"])
 local_txt = limpa(df_analise["Local"])
 em_stage  = (tipo_local == "OUTROS") & (local_txt.isin(LOCAIS_STAGE) | local_txt.str.match(PADRAO_STAGE, na=False))
 
-# Local de avaria: não trava o local inteiro, só as séries dele. Por isso, nos locais de avaria cada série
-# forma o seu próprio grupo; nos demais locais o grupo continua sendo o local.
-em_avaria = tipo_local == "AVARIA"
-g = df_analise["Local"].where(~em_avaria, "AV#" + df_analise["Serial"].astype(str))
+# Local transitório: "Outros" que não é stage
+em_transito = (tipo_local == "OUTROS") & ~em_stage
+
+# Devolução: o centro esperado vem do local (D010111 = B123 etc.), e não do mapa de ruas
+em_devolucao = tipo_local == "DEVOLUCAO"
+centro_dev   = local_txt.map(LOCAIS_DEVOLUCAO).fillna(centro_wms)    # fora da lista, vale o centro do setor do WMS (se houver)
+centro1      = centro1.where(~em_devolucao, centro_dev)
+centro2      = centro2.where(~em_devolucao, "-")
+tipo_rua     = tipo_rua.where(~em_devolucao, "MONO")
+
+# Na devolução, o DEVT do WMS equivale ao B148 (depósito padrão da área)
+dep_wms   = dep_wms.where(~(em_devolucao & (dep_wms == "DEVT")), "B148")
+setor_wms = setor_wms.where(
+    ~(em_devolucao & setor_wms.str.endswith("_DEVT", na=False)),
+    setor_wms.str.replace("_DEVT", "_B148", regex=False),
+)
+
+# Áreas de setor fixo: avaria (e sucata), devolução e transitório. Não travam o local inteiro, só as séries dele.
+# Por isso, nelas cada série forma o seu próprio grupo; nos demais locais o grupo continua sendo o local.
+em_avaria     = tipo_local.isin(["AVARIA", "SUCATA"])
+em_av_dev     = em_avaria | em_devolucao
+em_setor_fixo = em_av_dev | em_transito
+g = df_analise["Local"].where(~em_setor_fixo, "AV#" + df_analise["Serial"].astype(str))
 
 # Serial duplicado no WMS (as duas linhas; o SAP não repete serial)
 serial_dup_wms = df_analise["Serial"].duplicated(keep=False)
@@ -391,6 +361,9 @@ so_wms   = df_analise["Local"].notna() & df_analise["Setor SAP"].isna()    # sem
 so_sap   = df_analise["Local"].isna()  & df_analise["Setor SAP"].notna()   # sem Local
 nos_dois = df_analise["Local"].notna() & df_analise["Setor SAP"].notna()
 
+# Pendente expedição: série só no WMS, em setor de expedição (DOCA)
+pendente_expedicao = so_wms & setor_wms.isin(SETORES_PENDENTE_EXPEDICAO)
+
 # Material divergente: nos dois estoques, material preenchido nos dois lados e diferente
 material_div = (
     nos_dois
@@ -399,8 +372,8 @@ material_div = (
     & (mat_sap != mat_wms).fillna(False).astype(bool)
 )
 
-# Falta: setor FALTA ou SOBRA/FALTA no WMS
-falta_wms       = setor_wms.isin(["FALTA", "SOBRA/FALTA"])
+# Falta: setor FALTA ou SOBRA/FALTA no WMS. O local de inventário (prefixo INV) segue a regra da falta.
+falta_wms       = setor_wms.isin(["FALTA", "SOBRA/FALTA"]) | (tipo_local == "INVENTARIO")
 falta_b111      = falta_wms & (dep_sap == "B111")
 falta_fora_b111 = falta_wms & dep_sap.notna() & (dep_sap != "B111")
 
@@ -415,6 +388,10 @@ b140_errado = nos_dois & (dep_sap == "B140") & dep_wms.notna() & (dep_wms != "B1
 # B140 só no WMS (SAP em outro depósito) também é erro, porque o B140 sempre nasce no SAP.
 # Ainda sem ação definida: a série fica em análise e trava o local.
 b140_so_wms = nos_dois & (dep_wms == "B140") & dep_sap.notna() & (dep_sap != "B140")
+
+# Dentro do B140 só no WMS: se o SAP está livre (B110, B114 ou B413), a ação é validar no WMS se a série é B140.
+# Com o SAP em outro depósito (avaria, por exemplo) a série continua em análise.
+validar_b140 = nos_dois & (dep_wms == "B140") & dep_sap.isin(DEP_LIVRES)
 
 # Fabricação: série nos dois estoques, com Data SAP, sem Data WMS e depósito SAP diferente de TEMP e B145
 data_sap_raw = pd.to_datetime(df_analise["Data SAP"])
@@ -438,11 +415,12 @@ produto_em_pecas = df_analise["Local"].notna() & tipo_mat_rua.isin(TIPOS_RUA_PEC
 # Condições por série
 setor_ok  = setor_sap.notna() & (setor_sap == setor_wms)
 
-# Local de avaria não depende do mapa de ruas: para ele, basta ter centro no WMS
+# Local de avaria e local transitório não dependem do mapa de ruas: para eles, basta ter centro no WMS
 centro_ok = centro_wms.notna() & (
     (centro_wms == centro1) |
     ((tipo_rua == "MULTI") & (centro_wms == centro2)) |
-    em_avaria
+    em_avaria |
+    em_transito
 )
 
 data_sap = pd.to_datetime(df_analise["Data SAP"]).dt.normalize()
@@ -492,47 +470,43 @@ iqc_ok = iqc_ef.isna() | (iqc_ef == dep_wms)
 # Com IQC preenchido valem as regras do IQC (ex.: IQC igual ao depósito do WMS é "Mover no SAP para o depósito do IQC").
 validar_avaria = nos_dois & dep_sap.isin(DEP_LIVRES) & dep_wms.isin(DEP_AVARIA) & iqc_ef.isna()
 
-# Mover no SAP para B148: a série está em um local de avaria, o depósito do SAP é livre e não há IQC.
-# Em local de avaria esta regra vale no lugar de "Validar no físico se é avaria", porque o próprio local já é de avaria.
+# Mover no SAP para B148: a série está em um local de avaria (ou sucata), o depósito do SAP é livre e não há IQC.
+# Nesses locais esta regra vale no lugar de "Validar no físico se é avaria", porque o local já é de B148.
+# Na devolução e no transitório, o SAP livre vira "Mover série para local do setor correto".
 mover_b148 = nos_dois & em_avaria & dep_sap.isin(DEP_LIVRES) & iqc.isna()
 
 # O IQC prevalece: série em local de avaria com SAP livre e IQC de avaria (B149, B137 ou B136)
 # vai no SAP para o depósito do IQC, e não para o B148.
-mover_iqc_av = nos_dois & em_avaria & dep_sap.isin(DEP_LIVRES) & iqc_real.isin(DEP_AVARIA) & (iqc_real != dep_sap)
+mover_iqc_av = nos_dois & em_av_dev & dep_sap.isin(DEP_LIVRES) & iqc_real.isin(DEP_AVARIA) & (iqc_real != dep_sap)
 
 # Validar no físico (local de avaria): SAP livre e IQC livre. A qualidade aprovou o material,
 # mas ele está em um local de avaria, então o físico precisa ser conferido.
 validar_av_local = nos_dois & em_avaria & dep_sap.isin(DEP_LIVRES) & iqc_real.isin(DEP_LIVRES)
 
-# Mover no WMS para o depósito do SAP: série em local de avaria com o SAP já em depósito de avaria (B149, B137 ou B136)
-# e o WMS ainda em B148. Vale sem IQC ou com IQC igual ao depósito do SAP, e com o mesmo centro nos dois lados.
-# Em garantia o B149 não existe, então fica de fora.
-mover_wms_av = (
-    nos_dois & em_avaria
-    & dep_sap.isin(DEP_AVARIA) & (dep_wms == "B148")
-    & (centro_sap == centro_wms)
-    & (iqc_real.isna() | (iqc_real == dep_sap))
-    & ~(gar_sap & (dep_sap == "B149"))
-)
-
-# Corrigir setor AV: série em local de avaria, nos dois estoques, com o setor do WMS diferente do SAP e
-# data e material iguais. O IQC, se existir, concorda com o depósito do SAP (senão o IQC prevalece e a série fica em análise).
-# Fica no fim da lista de regras, então só vale para o que sobraria em "Em análise".
-corrigir_setor_av = (
-    nos_dois & em_avaria
+# Mover série para local do setor correto: nas áreas de setor fixo a série nunca muda de setor. Se o setor do SAP é
+# diferente do setor da área no WMS, a série precisa ser movida para um local do setor dela (o setor do SAP).
+# Substitui o "Corrigir setor AV", o "Mover no WMS para o depósito do SAP", o "Mover pallet para a rua" na devolução
+# e o "Corrigir setor no WMS" no transitório. O IQC, se existir, concorda com o depósito do SAP
+# (senão o IQC prevalece e a série fica em análise).
+mover_serie = (
+    nos_dois & em_setor_fixo & setor_wms.notna()
     & ~setor_ok
+    & ~serial_dup_wms & ~pend_sap & ~falta_wms
     & data_ok & material_ok
-    & ~b135_sap & ~b135_wms & ~b140_so_wms & ~falta_wms
+    & ~b135_sap & ~b135_wms
     & (iqc_ef.isna() | (iqc_ef == dep_sap))
 )
 
-# Desmembrar multi data: local livre com mais de uma data no SAP. O FIFO exige uma única data por local livre.
-# "Livre" vale pelo ponto de vista do SAP: só entram na conta as séries com depósito do SAP livre (B110, B114, B413).
-# O depósito do WMS não é critério. Só vale para locais do tipo Rua ou Blocado. Todas as séries do local recebem o rótulo.
-# Local de falta (setor FALTA ou SOBRA/FALTA no WMS) não é um endereço físico, então não entra.
+# Cadastrar setor do local no WMS: a série está nos dois estoques, mas o local não tem setor cadastrado no WMS.
+# Fica depois do desmembrar e do mover pallet: um local que vai ficar vazio não precisa de cadastro.
+cadastrar_setor = nos_dois & setor_wms.isna()
+
+# Desmembrar multi data: só locais do tipo Rua, só séries com depósito livre no SAP (B110, B114, B413).
+# O FIFO exige uma única data por local livre, então a conta de datas olha só as séries livres no SAP.
+# Série não livre no SAP, local Blocado e local de falta não entram.
 livre_sap        = nos_dois & dep_sap.isin(DEP_LIVRES)
 datas_livres_sap = data_sap.where(livre_sap).groupby(g, dropna=False).transform("nunique")
-multi_data       = nos_dois & tipo_fisico & ~falta_wms & (datas_livres_sap > 1)
+multi_data       = livre_sap & (tipo_local == "RUA") & ~falta_wms & (datas_livres_sap > 1)
 
 # Desmembrar físico: local do tipo Rua ou Blocado com mais de um setor no SAP.
 # Série sem SAP (só no WMS) não conta como setor.
@@ -593,11 +567,12 @@ serie_M = serie_D | serie_F
 
 # S) corrigir o setor do local no WMS: o pallet inteiro tem o mesmo setor no SAP, o centro do SAP é o da rua,
 #    data e material batem, e o setor do WMS é diferente. A correção é trocar o setor do local no WMS.
-#    Não vale para local de avaria (para a avaria existe o "Corrigir setor AV").
+#    Não vale para as áreas de setor fixo (avaria, devolução e transitório): nelas a série é movida de local.
 centro_sap_ok = centro_sap.notna() & (
     (centro_sap == centro1) |
     ((tipo_rua == "MULTI") & (centro_sap == centro2)) |
-    em_avaria
+    em_avaria |
+    em_transito
 )
 
 serie_S = (
@@ -612,7 +587,8 @@ serie_S = (
     & ~b140_errado
     & ~b140_so_wms
     & ~produto_em_pecas
-    & ~em_avaria
+    & ~em_setor_fixo
+    & setor_wms.notna()                          # sem setor no WMS não há o que corrigir: é "Cadastrar setor do local no WMS"
     & centro_sap_ok
     & data_ok
     & material_ok
@@ -630,6 +606,7 @@ corrigir_setor = serie_S & local_todo_S & local_setor_sap_unico & local_setor_wm
 
 # T) mover o pallet para a rua certa: o centro do SAP NÃO é o da rua onde o pallet está. O setor do SAP ser
 #    igual ou diferente do setor do WMS é irrelevante. A rua precisa estar no mapa (sem mapa não há centro de referência).
+#    Só vale para locais de Rua e Blocado (nível local). Nas áreas de setor fixo a regra é "Mover série para local do setor correto".
 serie_T = (
     nos_dois
     & ~serial_dup_wms
@@ -642,6 +619,7 @@ serie_T = (
     & ~b140_errado
     & ~b140_so_wms
     & ~produto_em_pecas
+    & ~em_setor_fixo
     & centro1.notna()
     & ~centro_sap_ok
     & data_ok
@@ -669,16 +647,16 @@ acao_sem_bloqueio = (
     & ~material_div
 )
 
-# C) bloqueio: qualquer série que não seja A, B, D, E, F, S ou T, nem uma ação por série sem bloqueio.
+# C) bloqueio: qualquer série que não seja A, B, D, E, F, S, T ou "mover série", nem uma ação por série sem bloqueio.
 # O B135 (errado no WMS ou só no WMS) e o B140 só no WMS bloqueiam o local mesmo que a série tenha outro rótulo de ação.
 serie_C = (
-    (~(serie_A | serie_B | serie_D | serie_E | serie_F | corrigir_setor | mover_rua) & ~acao_sem_bloqueio)
+    (~(serie_A | serie_B | serie_D | serie_E | serie_F | corrigir_setor | mover_rua | mover_serie) & ~acao_sem_bloqueio)
     | ((b135_errado | b135_so_wms) & b135_bloqueia_local)
     | (b140_errado & b140_bloqueia_local)
     | b140_so_wms
 )
 
-# O resultado vale para o local inteiro (em local de avaria, vale só para a própria série)
+# O resultado vale para o local inteiro (em local de avaria, devolução e transitório, vale só para a própria série)
 def por_local(m):
     return m.groupby(g, dropna=False).transform("any")
 
@@ -727,6 +705,12 @@ mover_wms   = nos_dois & serie_F & ~local_bloqueado
 desbloquear = nos_dois & serie_L & ~local_bloqueado & ~acao_serie
 excecao     = nos_dois & serie_E & ~local_bloqueado
 
+# Nas áreas de setor fixo, o movimento para o depósito do IQC também é "Mover série para local do setor correto"
+mover_serie_iqc = em_setor_fixo & (avancar | mover_wms)
+
+# Saldo em transitório: no local transitório, o que seria OK (ou OK de exceção) vira "Saldo em transitório"
+saldo_transito = em_transito & (ok | ok_parcial | excecao)
+
 # A ordem das regras é a ordem de gravidade (a primeira verdadeira vence). Ordem definida:
 #   0) integridade
 #   1) ações só no sistêmico (WMS antes do SAP), com as verificações no físico
@@ -737,6 +721,7 @@ regras = [
     # 0) integridade
     (serial_dup_wms,                  "Serial duplicado no WMS"),
     (material_div,                    "Material divergente entre SAP e WMS"),
+    (pendente_expedicao,              ROTULO_EXPEDICAO),
     (so_wms,                          "Serial existe apenas no WMS"),
     # 1a) sistêmico no WMS (as verificações no físico mantêm a posição que já tinham: logo depois de fabricação e data)
     (preencher_fab,                   "Preencher fabricação no WMS"),
@@ -744,6 +729,7 @@ regras = [
     (validar_av_local,                ROTULO_VALIDAR_AVARIA),
     (validar_fisico,                  ROTULO_VALIDAR_EXISTE),
     (validar_avaria & ~mover_b148,    ROTULO_VALIDAR_AVARIA),     # em local de avaria o "Mover no SAP para B148" substitui esta validação
+    (validar_b140,                    ROTULO_VALIDAR_B140),
     (ativar_e_lote,                   "Ativar local e desbloquear lote no WMS"),
     (ativar_local,                    "Ativar local no WMS"),
     (corrigir_setor,                  ROTULO_SETOR),
@@ -765,15 +751,16 @@ regras = [
     # 3) mudar o pallet de local
     (b140_errado,                     ROTULO_B140),
     (produto_em_pecas,                "Produto em rua de peças"),
-    (mover_wms_av,                    ROTULO_AV_WMS),
-    (mover_rua,                       ROTULO_RUA),
+    (mover_serie | mover_serie_iqc,   ROTULO_MOVER_SERIE),         # áreas de setor fixo: mover a série (nível série)
+    (mover_rua,                       ROTULO_RUA),                 # Rua e Blocado: mover o pallet (nível local)
     (avancar,                         "Mover no WMS e no SAP para o depósito do IQC"),
     (mover_wms,                       "Mover no WMS para o depósito do IQC"),
+    (cadastrar_setor,                 ROTULO_CADASTRAR),           # o local que vai ficar vazio (desmembrar ou mover) não precisa de cadastro
     # 4) demais
+    (saldo_transito,                  ROTULO_TRANSITO),
     (ok,                              "OK"),
     (ok_parcial,                      "OK - parcial local"),
     (excecao,                         "OK - exceção status mais grave que o IQC"),
-    (corrigir_setor_av,               ROTULO_SETOR_AV),
 ]
 condicoes = [c for c, _ in regras]
 valores   = [v for _, v in regras]
@@ -782,6 +769,12 @@ df_analise["Analise"] = np.select(condicoes, valores, default="Em análise")
 
 # Stage: o que sobraria em "Em análise" nos locais de stage vira "Em stage"
 df_analise.loc[(df_analise["Analise"] == "Em análise") & em_stage, "Analise"] = ROTULO_STAGE
+
+# Série presa: está certa por si só, mas o local tem série que só existe no WMS e trava o local inteiro
+ROTULO_PRESA = "Série presa por local errado"
+n_so_wms_local = so_wms.astype(int).groupby(g, dropna=False).transform("sum")
+presa = (df_analise["Analise"] == "Em análise") & ~serie_C & por_local(so_wms)
+df_analise.loc[presa, "Analise"] = ROTULO_PRESA
 
 # ---------- Colunas derivadas da Analise ----------
 mapa_acao = {
@@ -806,15 +799,19 @@ mapa_acao = {
     ROTULO_B140:                                    ("WMS",       "Série"),
     ROTULO_VALIDAR_EXISTE:                          ("Físico",    "Série"),
     ROTULO_VALIDAR_AVARIA:                          ("Físico",    "Série"),
+    ROTULO_VALIDAR_B140:                            ("WMS",       "Série"),
     ROTULO_B135:                                    ("WMS",       "Local"),
     ROTULO_SETOR:                                   ("WMS",       "Local"),
     ROTULO_RUA:                                     ("WMS",       "Local"),
     ROTULO_AV_B148:                                 ("SAP",       "Série"),
-    ROTULO_AV_WMS:                                  ("WMS",       "Série"),
-    ROTULO_SETOR_AV:                                ("WMS",       "Série"),
+    ROTULO_MOVER_SERIE:                             ("WMS",       "Série"),
+    ROTULO_CADASTRAR:                               ("WMS",       "Local"),
     ROTULO_DESM_FISICO:                             ("Físico",    "Local"),
     ROTULO_DESM_DATA:                               ("Físico",    "Local"),
     ROTULO_STAGE:                                   ("A definir", "A definir"),
+    ROTULO_PRESA:                                   ("A definir", "A definir"),
+    ROTULO_EXPEDICAO:                               ("WMS",       "A definir"),
+    ROTULO_TRANSITO:                                ("WMS",       "A definir"),
     "Material divergente entre SAP e WMS":          ("A definir", "A definir"),
     "Serial existe apenas no WMS":                  ("A definir", "A definir"),
     "Serial existe apenas no SAP":                  ("A definir", "Série"),
@@ -824,12 +821,23 @@ tabela_acao = pd.DataFrame.from_dict(mapa_acao, orient="index", columns=["Onde a
 df_analise["Onde agir"] = df_analise["Analise"].map(tabela_acao["Onde agir"])
 df_analise["Nível"]     = df_analise["Analise"].map(tabela_acao["Nível"])
 
-# Em local de avaria, os movimentos no WMS agem só na série (e não no local inteiro)
-mov_wms_local = df_analise["Analise"].isin([
-    "Mover no WMS e no SAP para o depósito do IQC",
-    "Mover no WMS para o depósito do IQC",
-])
-df_analise.loc[mov_wms_local & em_avaria, "Nível"] = "Série"
+# Quando o movimento vem do IQC, o SAP também precisa mudar de depósito
+df_analise.loc[mover_serie_iqc & (df_analise["Analise"] == ROTULO_MOVER_SERIE), "Onde agir"] = "WMS e SAP"
+
+# ---------- Prioridade ----------
+# Baixa:   o status é OK (ou um dos OK parciais)
+# Crítico: qualquer outro status, com o depósito do SAP livre (B110, B114 ou B413)
+# Normal:  o resto (inclui séries só no WMS, que não têm depósito no SAP)
+STATUS_PRIORIDADE_BAIXA = ["OK", "OK - parcial local", "OK - exceção status mais grave que o IQC"]
+
+df_analise["Prioridade"] = np.select(
+    [
+        df_analise["Analise"].isin(STATUS_PRIORIDADE_BAIXA),
+        dep_sap.isin(DEP_LIVRES),
+    ],
+    ["Baixa", "Crítico"],
+    default="Normal",
+)
 
 # Motivo da análise: lista as regras que falharam, só para quem ficou em "Em análise"
 em_analise = df_analise["Analise"] == "Em análise"
@@ -840,7 +848,7 @@ flags = pd.DataFrame({
     "Data SAP ≠ Data WMS":                          nos_dois & data_sap_raw.notna() & data_wms_raw.notna() & ~data_ok,
     "B135 só no WMS (SAP em outro depósito)":       b135_so_wms,
     "B140 só no WMS (SAP em outro depósito)":       b140_so_wms,
-    "Rua fora do mapa":                             nos_dois & centro1.isna() & ~em_avaria,
+    "Rua fora do mapa":                             nos_dois & centro1.isna() & ~em_avaria & ~em_transito,
     "Centro da rua ≠ Centro WMS":                   nos_dois & ~centro_ok,
     "Material vazio no SAP ou no WMS":              nos_dois & (mat_sap.isna() | mat_wms.isna()),
     "Centro SAP ≠ Centro da rua":                   nos_dois & ~centro_sap_ok,
@@ -859,6 +867,11 @@ if em_analise.any():
     texto = flags[em_analise].apply(lambda r: " + ".join(r.index[r.values]), axis=1)
     df_analise.loc[em_analise, "Motivo da análise"] = texto.replace("", "Outro motivo")
 
+# Motivo da série presa (precisa ficar depois do bloco acima, senão ele é apagado)
+df_analise.loc[presa, "Motivo da análise"] = (
+    "Série certa; local travado por " + n_so_wms_local[presa].astype(str) + " série(s) que só existe(m) no WMS"
+)
+
 
 # %% Exporta para Excel: aba "Analise" (df_analise inteiro) e aba "Resumo" (contagem por status)
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -869,13 +882,13 @@ COR_CABECALHO = "1F3864"   # azul escuro
 
 
 def montar_resumo(df):
-    """Uma linha por status, com a ação e o nível correspondentes."""
+    """Uma linha por status, com a quantidade de séries, de locais distintos, a ação e o nível."""
     def juntar(s):
         return " / ".join(pd.unique(s.dropna()))
 
     resumo = (
         df.groupby("Analise")
-        .agg(Qtd=("Serial", "size"), Onde_agir=("Onde agir", juntar), Nivel=("Nível", juntar))
+        .agg(Qtd=("Serial", "size"), Locais=("Local", "nunique"), Onde_agir=("Onde agir", juntar), Nivel=("Nível", juntar))
         .reset_index()
         .sort_values(["Qtd", "Analise"], ascending=[False, True])
         .reset_index(drop=True)
@@ -912,11 +925,14 @@ def exportar_excel(df, caminho):
         rs = wb.create_sheet("Resumo")
         rs["A1"] = "Resumo da análise - batimento de estoque SAP x WMS"
         rs["A1"].font = Font(name=FONTE, size=12, bold=True)
-        rs["A2"] = f"Gerado em {datetime.now():%d/%m/%Y %H:%M}. A coluna Qtd conta as linhas da aba Analise."
+        rs["A2"] = (
+            f"Gerado em {datetime.now():%d/%m/%Y %H:%M}. Qtd = séries na aba Analise. "
+            "Locais = locais distintos no status (série sem local não conta; um local pode aparecer em mais de um status)."
+        )
         rs["A2"].font = Font(name=FONTE, size=9, italic=True, color="595959")
 
         cab_row = 4
-        for j, titulo in enumerate(["Analise", "Qtd", "% do total", "Onde agir", "Nível"], start=1):
+        for j, titulo in enumerate(["Analise", "Qtd", "Locais", "% do total", "Onde agir", "Nível"], start=1):
             c = rs.cell(cab_row, j, titulo)
             c.font = Font(name=FONTE, size=10, bold=True, color="FFFFFF")
             c.fill = PatternFill("solid", start_color=COR_CABECALHO)
@@ -931,18 +947,20 @@ def exportar_excel(df, caminho):
             r = primeira + i
             rs.cell(r, 1, linha["Analise"])
             rs.cell(r, 2, f"=COUNTIF({faixa},A{r})").number_format = "#,##0"
-            rs.cell(r, 3, f"=B{r}/$B${total}").number_format = "0.0%"
-            rs.cell(r, 4, linha["Onde_agir"])
-            rs.cell(r, 5, linha["Nivel"])
+            rs.cell(r, 3, int(linha["Locais"])).number_format = "#,##0"
+            rs.cell(r, 4, f"=B{r}/$B${total}").number_format = "0.0%"
+            rs.cell(r, 5, linha["Onde_agir"])
+            rs.cell(r, 6, linha["Nivel"])
 
         rs.cell(total, 1, "Total")
         rs.cell(total, 2, f"=SUM(B{primeira}:B{ultima})").number_format = "#,##0"
-        rs.cell(total, 3, f"=SUM(C{primeira}:C{ultima})").number_format = "0.0%"
-        for j in range(1, 6):
+        rs.cell(total, 3, int(df["Local"].nunique())).number_format = "#,##0"     # locais distintos no total (não é a soma da coluna)
+        rs.cell(total, 4, f"=SUM(D{primeira}:D{ultima})").number_format = "0.0%"
+        for j in range(1, 7):
             rs.cell(total, j).font = Font(name=FONTE, size=10, bold=True)
             rs.cell(total, j).fill = PatternFill("solid", start_color="D9E1F2")
 
-        for letra, largura in zip("ABCDE", [48, 12, 12, 16, 16]):
+        for letra, largura in zip("ABCDEF", [48, 12, 12, 12, 16, 16]):
             rs.column_dimensions[letra].width = largura
         rs.freeze_panes = f"A{primeira}"
 
