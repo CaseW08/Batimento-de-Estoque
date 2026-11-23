@@ -2,14 +2,17 @@
 """
 Batimento de estoque SAP x WMS
 ==============================
-Lê as 6 bases de origem, monta o df_analise, classifica cada série (coluna "Analise") e
-gera um Excel com duas abas: "Analise" (df_analise inteiro) e "Resumo" (contagem por status).
+Lê as bases de origem, monta o df_analise, classifica cada série (coluna "Analise") e gera um Excel com duas
+abas: "Analise" (df_analise inteiro) e "Resumo" (séries e locais por status).
+
+ATENÇÃO: este arquivo é gerado automaticamente a partir do batimento.ipynb (python gerar_py.py).
+Não edite aqui: edite o notebook, valide, e gere de novo.
 
 Como usar
 ---------
-1) Deixe este arquivo na mesma pasta dos arquivos de origem (ou ajuste PASTA_ENTRADA abaixo):
-     IQ09.xlsx | GerenciadorInformacoesEspecificas.csv | EstoqueLocalPorLote.csv |
-     Mapa de Locais.xlsx | 00 - Avarias.xlsx | 01 - Devoluções.xlsx
+1) Deixe este arquivo na mesma pasta dos arquivos de origem (ou ajuste PASTA_ENTRADA no começo do código):
+     IQ09.xlsx | GerenciadorInformacoesEspecificas.csv | EstoqueLocalPorLote.csv | Mapa de Locais.xlsx |
+     Mapa de Estoque.xlsx | 00 - Avarias.xlsx | 01 - Devoluções.xlsx
 2) Rode:  python batimento_estoque.py
 3) O Excel sai na mesma pasta, com data e hora no nome (não sobrescreve o anterior).
 
@@ -35,11 +38,14 @@ PASTA_SAIDA   = Path(os.environ.get("BATIMENTO_SAIDA", PASTA_SCRIPT))
 
 ARQUIVOS = [
     "IQ09.xlsx", "GerenciadorInformacoesEspecificas.csv", "EstoqueLocalPorLote.csv",
-    "Mapa de Locais.xlsx", "00 - Avarias.xlsx", "01 - Devoluções.xlsx",
+    "Mapa de Locais.xlsx", "Mapa de Estoque.xlsx", "00 - Avarias.xlsx", "01 - Devoluções.xlsx",
 ]
 faltando = [a for a in ARQUIVOS if not (PASTA_ENTRADA / a).exists()]
 if faltando:
     raise FileNotFoundError(f"Arquivos não encontrados em {PASTA_ENTRADA}: {', '.join(faltando)}")
+
+# %% Caminho do Excel de saída
+from datetime import datetime
 
 CAMINHO_EXCEL = PASTA_SAIDA / f"Batimento_Estoque_{datetime.now():%Y-%m-%d_%H%M}.xlsx"
 
@@ -135,6 +141,43 @@ df_analise = df_analise[[
     "Lote", "Lote Liberado",
 ]]
 
+# %% Mapa de estoque (novo mapa, por endereço). Complementa o Mapa de Locais: o que não está nele continua pelo antigo.
+df_mapa_estoque = pd.read_excel(PASTA_ENTRADA / "Mapa de Estoque.xlsx")
+
+centro_end = df_mapa_estoque["Centro"].astype(str).str.strip()
+inativar   = centro_end.str.upper().eq("INATIVAR")
+nao_existe = df_mapa_estoque["Tipo de Local"].astype(str).str.strip().str.upper().isin(["NÃO EXISTE", "NAO EXISTE"])
+
+df_mapa_estoque["Situação do Endereço"] = np.select([nao_existe, inativar], ["Não Existe", "Inativar"], default="Ativo")
+
+# Túnel tem a mesma característica do pulmão (só é mapeado por ter menos posições)
+df_mapa_estoque["Tipo de Endereço"] = (
+    df_mapa_estoque["Tipo de Local"].astype(str).str.strip()
+    .replace({"Tunel": "Pulmão", "Túnel": "Pulmão"})
+)
+
+ativo = df_mapa_estoque["Situação do Endereço"].eq("Ativo")
+df_mapa_estoque["Centro do Endereço"]   = df_mapa_estoque["Centro"].where(ativo)
+df_mapa_estoque["Depósito do Endereço"] = df_mapa_estoque["Deposito"].where(ativo)
+df_mapa_estoque["Setor do Endereço"]    = (df_mapa_estoque["Centro"].astype(str) + "_" + df_mapa_estoque["Deposito"].astype(str)).where(ativo)
+df_mapa_estoque["Setor Completo do Endereço"] = df_mapa_estoque["Setor"].where(ativo)
+df_mapa_estoque["Material do Endereço"] = df_mapa_estoque["Material"].where(
+    ~df_mapa_estoque["Material"].astype(str).str.strip().str.upper().isin(["DINÂMICO", "DINAMICO"])   # dinâmico = qualquer material
+)
+
+COLS_MAPA_ESTOQUE = [
+    "Situação do Endereço", "Tipo de Endereço", "Centro do Endereço", "Depósito do Endereço",
+    "Setor do Endereço", "Setor Completo do Endereço", "Material do Endereço",
+]
+df_analise = df_analise.merge(df_mapa_estoque[["Local"] + COLS_MAPA_ESTOQUE], on="Local", how="left")
+
+# De onde vem a referência de cada local: do mapa novo, do mapa antigo (rua) ou de nenhum dos dois
+df_analise["Fonte do Mapa"] = np.select(
+    [df_analise["Situação do Endereço"].notna(), df_analise["Centro 1 da Rua"].notna()],
+    ["Mapa de Estoque", "Mapa de Locais"],
+    default="Fora do mapa",
+)
+
 # %% Qualidade: avarias
 df_avaria = pd.read_excel(PASTA_ENTRADA / "00 - Avarias.xlsx")
 df_avaria_corrigido = df_avaria.dropna(subset="Nº SÉRIE").copy()
@@ -179,8 +222,8 @@ mask = aprovado & livre_do_centro.notna()
 df_analise.loc[mask, "Status IQC"] = livre_do_centro[mask]
 mask = df_analise["Centro SAP"].isin(["B179", "B180"]) & (df_analise["Status IQC"] == "B149")
 df_analise.loc[mask, "Status IQC"] = "B413"
-print("Linhas:", len(df_analise))
 
+print("Linhas:", len(df_analise))
 
 # %% Regras da análise (a ordem das regras define a prioridade)
 def limpa(s):
@@ -305,6 +348,30 @@ ROTULO_TRANSITO = "Saldo em transitório"
 # Depósitos em que o lote precisa estar liberado (livres e B149)
 DEP_LOTE_LIBERADO = ["B110", "B114", "B413", "B149"]
 
+# ---------- Mapa de Estoque (layout novo, por endereço) ----------
+# O mapa novo vale por local (endereço) e complementa o antigo: o que não está nele continua pelo Mapa de Locais.
+usar_mapa_estoque      = True    # False: ignora o mapa novo e volta ao comportamento anterior
+regra_endereco_inativo = True    # endereço "Inativar" e endereço que "Não Existe"
+regra_picking          = True    # picking: setor exato, material e uniformidade de SKU
+regra_avaria_no_mapa   = True    # avaria x livre nos endereços, B149/B137 de SKU único e B136 flexível
+
+ROTULO_END_INATIVO    = "Mover pallet de endereço inativo"
+ROTULO_END_NAO_EXISTE = "Endereço não existe no físico"
+ROTULO_MAT_PICKING    = "Material errado no picking"
+ROTULO_MULTI_SKU      = "Desmembrar multi SKU"
+ROTULO_MOVER_AVARIA   = "Mover série para local de avaria"
+ROTULO_MOVER_LIVRE    = "Mover série para local livre"
+
+# Ordem entre "Desbloquear lote no WMS" (sistêmico no WMS) e as ações do mapa (mover série, material errado no picking).
+# False: a ação do mapa vem primeiro (como já estava validado).
+# True:  "Desbloquear lote no WMS" vem primeiro, pela ordem "sistêmico antes de mover". Hoje afeta 3 séries.
+desbloquear_antes_do_mapa = False
+
+# Contagem cíclica: o SAP em B112 inativa o local no WMS. A série em B112 num local inativo está em contagem
+# e não recebe "Ativar local no WMS".
+ROTULO_CONTAGEM = "Em contagem"
+DEP_CONTAGEM    = "B112"
+
 setor_sap  = limpa(df_analise["Setor SAP"])
 setor_wms  = limpa(df_analise["Setor WMS"])
 centro_sap = limpa(df_analise["Centro SAP"])
@@ -324,6 +391,38 @@ tipo_local   = sem_acento(df_analise["Tipo de Local"])
 
 # Locais do tipo Rua ou Blocado: são os que estão no mapa de ruas, e os únicos que podem ser desmembrados
 tipo_fisico = tipo_local.isin(["RUA", "BLOCADO"])
+
+# ---------- Endereço no Mapa de Estoque ----------
+sit_end     = sem_acento(df_analise["Situação do Endereço"])
+tipo_end    = sem_acento(df_analise["Tipo de Endereço"])
+end_centro  = limpa(df_analise["Centro do Endereço"])
+end_dep     = limpa(df_analise["Depósito do Endereço"])
+end_setor   = limpa(df_analise["Setor do Endereço"])
+end_full    = limpa(df_analise["Setor Completo do Endereço"])
+end_mat     = limpa_material(df_analise["Material do Endereço"])
+wms_full    = limpa(df_analise["Setor Completo WMS"])
+
+no_mapa_novo   = usar_mapa_estoque & (df_analise["Fonte do Mapa"] == "Mapa de Estoque")
+end_ativo      = no_mapa_novo & (sit_end == "ATIVO")
+end_inativo    = no_mapa_novo & (sit_end == "INATIVAR")
+end_nao_existe = no_mapa_novo & (sit_end == "NAO EXISTE")
+end_picking    = end_ativo & (tipo_end == "PICKING")
+end_pulmao     = end_ativo & (tipo_end == "PULMAO")          # inclui o túnel
+
+# Tipo da série pelo depósito do SAP (avaria é o depósito do SAP)
+sap_livre    = dep_sap.isin(DEP_LIVRES)
+sap_b149_137 = dep_sap.isin(["B149", "B137"])
+sap_b136     = dep_sap == "B136"
+sap_avaria   = dep_sap.isin(DEP_AVARIA)
+end_avaria   = end_ativo & end_dep.isin(DEP_AVARIA)
+
+# B136 em endereço B136 é o mais flexível: pode ter vários SKUs e vários centros; só o depósito precisa bater
+b136_no_b136 = end_ativo & sap_b136 & (end_dep == "B136")
+
+# Centro do endereço no lugar do centro da rua, onde o mapa novo vale (o antigo continua nos demais locais)
+centro1  = centro1.where(~end_ativo, end_centro)
+centro2  = centro2.where(~end_ativo, "-")
+tipo_rua = tipo_rua.where(~end_ativo, "MONO")
 
 # Local de stage: tipo "Outros" e nome na lista ou no padrão
 local_txt = limpa(df_analise["Local"])
@@ -351,7 +450,11 @@ setor_wms = setor_wms.where(
 em_avaria     = tipo_local.isin(["AVARIA", "SUCATA"])
 em_av_dev     = em_avaria | em_devolucao
 em_setor_fixo = em_av_dev | em_transito
-g = df_analise["Local"].where(~em_setor_fixo, "AV#" + df_analise["Serial"].astype(str))
+
+# g_unif: grupo da uniformidade (data, setor, SKU). g: grupo do bloqueio. No picking cada série é avaliada sozinha
+# (uma série errada não trava as vizinhas), mas a uniformidade continua valendo no local inteiro.
+g_unif = df_analise["Local"].where(~em_setor_fixo, "AV#" + df_analise["Serial"].astype(str))
+g      = df_analise["Local"].where(~(em_setor_fixo | (end_picking & regra_picking)), "AV#" + df_analise["Serial"].astype(str))
 
 # Serial duplicado no WMS (as duas linhas; o SAP não repete serial)
 serial_dup_wms = df_analise["Serial"].duplicated(keep=False)
@@ -372,7 +475,7 @@ material_div = (
     & (mat_sap != mat_wms).fillna(False).astype(bool)
 )
 
-# Falta: setor FALTA ou SOBRA/FALTA no WMS. O local de inventário (prefixo INV) segue a regra da falta.
+# Falta: setor FALTA ou SOBRA/FALTA no WMS. O local de inventário (prefixo INV ou SB) segue a regra da falta.
 falta_wms       = setor_wms.isin(["FALTA", "SOBRA/FALTA"]) | (tipo_local == "INVENTARIO")
 falta_b111      = falta_wms & (dep_sap == "B111")
 falta_fora_b111 = falta_wms & dep_sap.notna() & (dep_sap != "B111")
@@ -413,14 +516,32 @@ pend_sap     = pend_inbound | pend_devol
 produto_em_pecas = df_analise["Local"].notna() & tipo_mat_rua.isin(TIPOS_RUA_PECAS)
 
 # Condições por série
+# No mapa novo, a série pode ter o setor do WMS corrigido (em vez de ser movida) quando o SAP bate com o endereço:
+# livre e B149/B137 pelo setor, B136 em B136 pelo depósito, e outros depósitos (B135, B148, B140...) fora de endereço de avaria.
+s_ok_mapa = (
+    ~end_ativo
+    | b136_no_b136
+    | ((sap_livre | sap_b149_137) & (setor_sap == end_setor))
+    | (~sap_livre & ~sap_avaria & ~end_avaria)
+)
 setor_ok  = setor_sap.notna() & (setor_sap == setor_wms)
+
+# No mapa novo: B136 em endereço B136 só precisa do depósito igual ao do WMS
+setor_ok = setor_ok.where(~b136_no_b136, dep_sap.notna() & (dep_sap == dep_wms))
+
+# No mapa novo: série livre ou B149/B137 exige o setor completo do WMS igual ao do endereço
+# (porta-pallet x picking). Se o WMS está com outro setor no local, a correção é do setor do local no WMS.
+exige_full    = end_ativo & (sap_livre | sap_b149_137)
+setor_full_ok = ~exige_full | (wms_full == end_full).fillna(False).astype(bool)
+setor_ok      = setor_ok & setor_full_ok
 
 # Local de avaria e local transitório não dependem do mapa de ruas: para eles, basta ter centro no WMS
 centro_ok = centro_wms.notna() & (
     (centro_wms == centro1) |
     ((tipo_rua == "MULTI") & (centro_wms == centro2)) |
     em_avaria |
-    em_transito
+    em_transito |
+    b136_no_b136
 )
 
 data_sap = pd.to_datetime(df_analise["Data SAP"]).dt.normalize()
@@ -501,17 +622,50 @@ mover_serie = (
 # Fica depois do desmembrar e do mover pallet: um local que vai ficar vazio não precisa de cadastro.
 cadastrar_setor = nos_dois & setor_wms.isna()
 
+# Picking: pertence ao picking a série que respeita o setor do endereço e, se o endereço tem material fixo, o material.
+pertence_picking = (
+    end_picking & regra_picking & nos_dois
+    & (setor_sap == end_setor)
+    & (end_mat.isna() | (mat_wms == end_mat).fillna(False).astype(bool))
+)
+
 # Desmembrar multi data: só locais do tipo Rua, só séries com depósito livre no SAP (B110, B114, B413).
 # O FIFO exige uma única data por local livre, então a conta de datas olha só as séries livres no SAP.
+# No picking só contam as séries que pertencem a ele (a errada é tirada por série).
 # Série não livre no SAP, local Blocado e local de falta não entram.
 livre_sap        = nos_dois & dep_sap.isin(DEP_LIVRES)
-datas_livres_sap = data_sap.where(livre_sap).groupby(g, dropna=False).transform("nunique")
-multi_data       = livre_sap & (tipo_local == "RUA") & ~falta_wms & (datas_livres_sap > 1)
+livre_sap_data   = livre_sap & (~(end_picking & regra_picking) | pertence_picking)
+datas_livres_sap = data_sap.where(livre_sap_data).groupby(g_unif, dropna=False).transform("nunique")
+multi_data       = livre_sap_data & (tipo_local == "RUA") & ~falta_wms & (datas_livres_sap > 1)
 
 # Desmembrar físico: local do tipo Rua ou Blocado com mais de um setor no SAP.
-# Série sem SAP (só no WMS) não conta como setor.
-setores_no_local = setor_sap.where(nos_dois).groupby(g, dropna=False).transform("nunique")
-desm_fisico      = nos_dois & tipo_fisico & (setores_no_local > 1)
+# Série sem SAP (só no WMS) não conta como setor. No mapa novo, o B136 em endereço B136 só conta como "B136"
+# (multi centro não é problema) e o picking é tratado por série.
+setor_chave      = setor_sap.where(~b136_no_b136, "B136")
+setores_no_local = setor_chave.where(nos_dois).groupby(g_unif, dropna=False).transform("nunique")
+desm_fisico      = nos_dois & tipo_fisico & ~(end_picking & regra_picking) & (setores_no_local > 1)
+
+# Desmembrar multi SKU: picking dinâmico e endereço de B149/B137 têm um único SKU (B149 e B137 podem ter várias datas).
+# B136 e o livre do pulmão podem ter vários SKUs. Só contam as séries que pertencem ao endereço.
+pertence_sku = nos_dois & (
+    (end_picking & regra_picking & end_mat.isna() & (setor_sap == end_setor))
+    | (end_pulmao & regra_avaria_no_mapa & end_dep.isin(["B149", "B137"]) & (dep_sap == end_dep) & (setor_sap == end_setor))
+)
+skus_no_local = mat_wms.where(pertence_sku).groupby(g_unif, dropna=False).transform("nunique")
+multi_sku     = pertence_sku & (skus_no_local > 1)
+
+# Endereço inativo ou que não existe no físico (Mapa de Estoque)
+endereco_inativo    = regra_endereco_inativo & nos_dois & end_inativo
+endereco_nao_existe = regra_endereco_inativo & nos_dois & end_nao_existe
+
+# Séries que estão no tipo de endereço errado (por série; não travam as vizinhas)
+mover_p_avaria = regra_avaria_no_mapa & nos_dois & end_ativo & sap_avaria & ~end_avaria                 # avaria em endereço livre
+mover_p_livre  = regra_avaria_no_mapa & nos_dois & end_avaria & sap_livre                               # livre em endereço de avaria
+av_pertence    = end_avaria & sap_avaria & ((sap_b149_137 & (setor_sap == end_setor)) | b136_no_b136)
+mover_av_setor = regra_avaria_no_mapa & nos_dois & end_avaria & ~sap_livre & ~av_pertence               # outro depósito ou setor errado em avaria
+mover_pk_setor = regra_picking & nos_dois & end_picking & ~sap_avaria & (setor_sap != end_setor)        # picking é de setor exato
+mat_errado_pk  = regra_picking & nos_dois & end_picking & end_mat.notna() & (setor_sap == end_setor) & (mat_wms != end_mat).fillna(False).astype(bool)
+acao_mapa      = mover_p_avaria | mover_p_livre | mover_av_setor | mover_pk_setor | mat_errado_pk
 
 # O IQC prevalece sobre o B135: o rótulo só vale sem IQC. Com IQC igual ao depósito do WMS, o caso é do
 # "Mover no SAP para o depósito do IQC"; com IQC diferente do depósito do WMS, a série fica em análise.
@@ -572,7 +726,8 @@ centro_sap_ok = centro_sap.notna() & (
     (centro_sap == centro1) |
     ((tipo_rua == "MULTI") & (centro_sap == centro2)) |
     em_avaria |
-    em_transito
+    em_transito |
+    b136_no_b136
 )
 
 serie_S = (
@@ -589,6 +744,7 @@ serie_S = (
     & ~produto_em_pecas
     & ~em_setor_fixo
     & setor_wms.notna()                          # sem setor no WMS não há o que corrigir: é "Cadastrar setor do local no WMS"
+    & s_ok_mapa                                  # no mapa novo, só corrige o setor do WMS quando o SAP bate com o endereço
     & centro_sap_ok
     & data_ok
     & material_ok
@@ -620,6 +776,7 @@ serie_T = (
     & ~b140_so_wms
     & ~produto_em_pecas
     & ~em_setor_fixo
+    & ~(end_picking & regra_picking)
     & centro1.notna()
     & ~centro_sap_ok
     & data_ok
@@ -630,7 +787,8 @@ local_todo_T = serie_T.groupby(g_setor, dropna=False).transform("all")
 mover_rua    = serie_T & local_todo_T & local_setor_sap_unico & local_setor_wms_unico
 
 # Séries cujo rótulo é uma ação própria por série (fabricação, data, internalização, B135, validar no físico, B140)
-acao_serie = preencher_fab | corrigir_data | pend_sap | b135_errado | validar_fisico | validar_avaria | b140_errado
+acao_serie_base = preencher_fab | corrigir_data | pend_sap | b135_errado | validar_fisico | validar_avaria | b140_errado
+acao_serie      = acao_serie_base | acao_mapa     # com as ações do mapa (mover série, material errado no picking...)
 
 # Dessas, as que não bloqueiam o local. Duplicado e material divergente têm rótulo pior e continuam bloqueando.
 acao_sem_bloqueio = (
@@ -642,6 +800,7 @@ acao_sem_bloqueio = (
         | (validar_fisico & (not validar_fisico_bloqueia_local))
         | (validar_avaria & (not validar_avaria_bloqueia_local))
         | (b140_errado & (not b140_bloqueia_local))
+        | acao_mapa
     )
     & ~serial_dup_wms
     & ~material_div
@@ -690,9 +849,15 @@ local_bloqueado = (
 # Local Ativo: o local inteiro precisa estar ativo (o valor é único por local)
 local_inativo = (df_analise["Local"].notna() & (loc_ativo != "S")).groupby(g, dropna=False).transform("any")
 
-# Séries que recebem a ação de ativar o local (duplicado, material, falta e ações por série mantêm o rótulo)
-elegivel_local = nos_dois & ~serial_dup_wms & ~material_div & ~falta_wms & ~acao_serie
+# Séries que recebem a ação de ativar o local (duplicado, material, falta e ações por série mantêm o rótulo).
+# As ações do mapa NÃO tiram a série do "Ativar local" (acao_serie_base), e o B135 também não: o local inativo
+# trava todas as séries, então ativar o local vem antes de "Material em IQC, errado no WMS".
+elegivel_local = nos_dois & ~serial_dup_wms & ~material_div & ~falta_wms & ~(acao_serie_base & ~b135_errado)
 lote_visivel   = lote_bloq & ~serie_M      # se a série vai ser movida, o mover sobrepõe o lote
+
+# Em contagem: a série está em B112 (contagem cíclica) num local que o WMS inativou. O B112 é a causa da inativação,
+# então a série não recebe "Ativar local no WMS". As vizinhas do local seguem as regras normais.
+em_contagem = nos_dois & local_inativo & (dep_sap == DEP_CONTAGEM)
 
 ativar_e_lote = elegivel_local & local_inativo & lote_visivel
 ativar_local  = elegivel_local & local_inativo
@@ -702,7 +867,7 @@ ok_parcial  = nos_dois & serie_A & ~local_bloqueado & ~local_inativo & (local_te
 mover_iqc   = nos_dois & serie_B & ~local_bloqueado
 avancar     = nos_dois & serie_D & ~local_bloqueado
 mover_wms   = nos_dois & serie_F & ~local_bloqueado
-desbloquear = nos_dois & serie_L & ~local_bloqueado & ~acao_serie
+desbloquear = nos_dois & serie_L & ~local_bloqueado & ~(acao_serie_base if desbloquear_antes_do_mapa else acao_serie)
 excecao     = nos_dois & serie_E & ~local_bloqueado
 
 # Nas áreas de setor fixo, o movimento para o depósito do IQC também é "Mover série para local do setor correto"
@@ -723,6 +888,7 @@ regras = [
     (material_div,                    "Material divergente entre SAP e WMS"),
     (pendente_expedicao,              ROTULO_EXPEDICAO),
     (so_wms,                          "Serial existe apenas no WMS"),
+    (endereco_nao_existe,             ROTULO_END_NAO_EXISTE),      # o endereço não existe no físico: o local está errado
     # 1a) sistêmico no WMS (as verificações no físico mantêm a posição que já tinham: logo depois de fabricação e data)
     (preencher_fab,                   "Preencher fabricação no WMS"),
     (corrigir_data,                   "Corrigir data no WMS"),
@@ -730,6 +896,7 @@ regras = [
     (validar_fisico,                  ROTULO_VALIDAR_EXISTE),
     (validar_avaria & ~mover_b148,    ROTULO_VALIDAR_AVARIA),     # em local de avaria o "Mover no SAP para B148" substitui esta validação
     (validar_b140,                    ROTULO_VALIDAR_B140),
+    (em_contagem,                     ROTULO_CONTAGEM),            # B112 em local inativo: exceção do "Ativar local"
     (ativar_e_lote,                   "Ativar local e desbloquear lote no WMS"),
     (ativar_local,                    "Ativar local no WMS"),
     (corrigir_setor,                  ROTULO_SETOR),
@@ -748,9 +915,15 @@ regras = [
     # 2) desmembrar (o multi data vem antes do desmembrar físico)
     (multi_data,                      ROTULO_DESM_DATA),
     (desm_fisico,                     ROTULO_DESM_FISICO),
+    (multi_sku,                       ROTULO_MULTI_SKU),
     # 3) mudar o pallet de local
+    (endereco_inativo,                ROTULO_END_INATIVO),
     (b140_errado,                     ROTULO_B140),
     (produto_em_pecas,                "Produto em rua de peças"),
+    (mover_p_avaria,                  ROTULO_MOVER_AVARIA),        # mapa novo: avaria em endereço livre
+    (mover_p_livre,                   ROTULO_MOVER_LIVRE),         # mapa novo: livre em endereço de avaria
+    (mat_errado_pk,                   ROTULO_MAT_PICKING),         # mapa novo: material errado no picking (vai para o dinâmico)
+    (mover_av_setor | mover_pk_setor, ROTULO_MOVER_SERIE),         # mapa novo: setor ou depósito errado (vai para um pulmão do setor SAP)
     (mover_serie | mover_serie_iqc,   ROTULO_MOVER_SERIE),         # áreas de setor fixo: mover a série (nível série)
     (mover_rua,                       ROTULO_RUA),                 # Rua e Blocado: mover o pallet (nível local)
     (avancar,                         "Mover no WMS e no SAP para o depósito do IQC"),
@@ -806,6 +979,13 @@ mapa_acao = {
     ROTULO_AV_B148:                                 ("SAP",       "Série"),
     ROTULO_MOVER_SERIE:                             ("WMS",       "Série"),
     ROTULO_CADASTRAR:                               ("WMS",       "Local"),
+    ROTULO_END_INATIVO:                             ("Físico",    "Local"),
+    ROTULO_END_NAO_EXISTE:                          ("A definir", "Local"),
+    ROTULO_MAT_PICKING:                             ("WMS",       "Série"),
+    ROTULO_MULTI_SKU:                               ("Físico",    "Local"),
+    ROTULO_MOVER_AVARIA:                            ("WMS",       "Série"),
+    ROTULO_MOVER_LIVRE:                             ("WMS",       "Série"),
+    ROTULO_CONTAGEM:                                ("A definir", "A definir"),
     ROTULO_DESM_FISICO:                             ("Físico",    "Local"),
     ROTULO_DESM_DATA:                               ("Físico",    "Local"),
     ROTULO_STAGE:                                   ("A definir", "A definir"),
@@ -833,7 +1013,7 @@ STATUS_PRIORIDADE_BAIXA = ["OK", "OK - parcial local", "OK - exceção status ma
 df_analise["Prioridade"] = np.select(
     [
         df_analise["Analise"].isin(STATUS_PRIORIDADE_BAIXA),
-        dep_sap.isin(DEP_LIVRES),
+        dep_sap.isin(DEP_LIVRES) | (df_analise["Analise"] == ROTULO_END_NAO_EXISTE),
     ],
     ["Baixa", "Crítico"],
     default="Normal",
@@ -872,8 +1052,7 @@ df_analise.loc[presa, "Motivo da análise"] = (
     "Série certa; local travado por " + n_so_wms_local[presa].astype(str) + " série(s) que só existe(m) no WMS"
 )
 
-
-# %% Exporta para Excel: aba "Analise" (df_analise inteiro) e aba "Resumo" (contagem por status)
+# %% Exporta para Excel: aba "Analise" (df_analise inteiro) e aba "Resumo" (séries e locais por status)
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
