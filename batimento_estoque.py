@@ -5,9 +5,6 @@ Batimento de estoque SAP x WMS
 Lê as bases de origem, monta o df_analise, classifica cada série (coluna "Analise") e gera um Excel com duas
 abas: "Analise" (df_analise inteiro) e "Resumo" (séries e locais por status).
 
-ATENÇÃO: este arquivo é gerado automaticamente a partir do batimento.ipynb (python gerar_py.py).
-Não edite aqui: edite o notebook, valide, e gere de novo.
-
 Como usar
 ---------
 1) Deixe este arquivo na mesma pasta dos arquivos de origem (ou ajuste PASTA_ENTRADA no começo do código):
@@ -16,6 +13,7 @@ Como usar
 2) Rode:  python batimento_estoque.py
 3) O Excel sai na mesma pasta, com data e hora no nome (não sobrescreve o anterior).
 
+As regras são testadas primeiro no batimento.ipynb e só depois copiadas para este arquivo.
 No VS Code, os marcadores "# %%" permitem rodar célula por célula, como no notebook.
 """
 
@@ -45,8 +43,6 @@ if faltando:
     raise FileNotFoundError(f"Arquivos não encontrados em {PASTA_ENTRADA}: {', '.join(faltando)}")
 
 # %% Caminho do Excel de saída
-from datetime import datetime
-
 CAMINHO_EXCEL = PASTA_SAIDA / f"Batimento_Estoque_{datetime.now():%Y-%m-%d_%H%M}.xlsx"
 
 # %% Importar bases
@@ -372,6 +368,10 @@ desbloquear_antes_do_mapa = False
 ROTULO_CONTAGEM = "Em contagem"
 DEP_CONTAGEM    = "B112"
 
+# SAP em status pior que o IQC (B149, B137 ou B136) e WMS já igual ao IQC: o pior status prevalece, então o SAP fica
+# como está e o WMS é que acompanha o SAP. A série passa a "OK - exceção status mais grave que o IQC" depois disso.
+ROTULO_WMS_SAP = "Mover no WMS para o depósito do SAP"
+
 setor_sap  = limpa(df_analise["Setor SAP"])
 setor_wms  = limpa(df_analise["Setor WMS"])
 centro_sap = limpa(df_analise["Centro SAP"])
@@ -677,6 +677,10 @@ pos_dep = dep_wms.map(ordem)
 pos_dep = pos_dep.where(~(gar_sap & (dep_wms == "B149")), 0)   # em garantia, B149 antecede o livre
 pos_iqc = iqc_ef.map(ordem)
 
+# O SAP está em um status pior que o IQC? (B148, livres, B149, B137, B136, nessa ordem de gravidade)
+pos_sap      = dep_sap.map(ordem)
+sap_pior_iqc = pos_sap.notna() & pos_iqc.notna() & (pos_sap > pos_iqc)
+
 # Base comum: nos dois estoques, sem duplicado, fora de TEMP/DEVT, B135 errado, B140 errado ou só no WMS
 # e validar no físico, centro da rua, data e material iguais
 base_serie       = nos_dois & ~serial_dup_wms & ~pend_sap & ~b135_errado & ~b140_errado & ~b140_so_wms & ~validar_fisico & ~validar_avaria & centro_ok & data_ok & material_ok
@@ -864,7 +868,10 @@ ativar_local  = elegivel_local & local_inativo
 
 ok          = nos_dois & serie_A & ~local_bloqueado & ~local_inativo & ~local_tem_B & ~local_tem_M & ~local_tem_L
 ok_parcial  = nos_dois & serie_A & ~local_bloqueado & ~local_inativo & (local_tem_B | local_tem_M | local_tem_L)
-mover_iqc   = nos_dois & serie_B & ~local_bloqueado
+# Nas áreas de setor fixo nada muda (valem as regras próprias delas)
+sap_pior_ativo = sap_pior_iqc & ~em_setor_fixo
+mover_iqc      = nos_dois & serie_B & ~local_bloqueado & ~sap_pior_ativo
+mover_wms_sap  = nos_dois & serie_B & ~local_bloqueado & sap_pior_ativo
 avancar     = nos_dois & serie_D & ~local_bloqueado
 mover_wms   = nos_dois & serie_F & ~local_bloqueado
 desbloquear = nos_dois & serie_L & ~local_bloqueado & ~(acao_serie_base if desbloquear_antes_do_mapa else acao_serie)
@@ -926,6 +933,7 @@ regras = [
     (mover_av_setor | mover_pk_setor, ROTULO_MOVER_SERIE),         # mapa novo: setor ou depósito errado (vai para um pulmão do setor SAP)
     (mover_serie | mover_serie_iqc,   ROTULO_MOVER_SERIE),         # áreas de setor fixo: mover a série (nível série)
     (mover_rua,                       ROTULO_RUA),                 # Rua e Blocado: mover o pallet (nível local)
+    (mover_wms_sap,                   ROTULO_WMS_SAP),             # SAP pior que o IQC: o WMS acompanha o SAP
     (avancar,                         "Mover no WMS e no SAP para o depósito do IQC"),
     (mover_wms,                       "Mover no WMS para o depósito do IQC"),
     (cadastrar_setor,                 ROTULO_CADASTRAR),           # o local que vai ficar vazio (desmembrar ou mover) não precisa de cadastro
@@ -986,6 +994,7 @@ mapa_acao = {
     ROTULO_MOVER_AVARIA:                            ("WMS",       "Série"),
     ROTULO_MOVER_LIVRE:                             ("WMS",       "Série"),
     ROTULO_CONTAGEM:                                ("A definir", "A definir"),
+    ROTULO_WMS_SAP:                                 ("WMS",       "Série"),
     ROTULO_DESM_FISICO:                             ("Físico",    "Local"),
     ROTULO_DESM_DATA:                               ("Físico",    "Local"),
     ROTULO_STAGE:                                   ("A definir", "A definir"),
